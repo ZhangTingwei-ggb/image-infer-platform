@@ -39,8 +39,7 @@ def build_parser():
     p.add_argument("--viz_highres_tile", type=int, default=2048, help="高分 tile 边长 [default: 2048]")
     p.add_argument("--viz_highres_mpp", type=float, default=None, help="高分 mpp，默认 base mpp")
     p.add_argument("--viz_highres_max_tiles", type=int, default=16, help="最多生成多少张，-1 不限 [default: 16]")
-    p.add_argument("--save_viz_highres_full", action="store_true", help="also save a single stitched full high-res image (risky for large WSI; see --viz_highres_full_max_mpix)")
-    p.add_argument("--viz_highres_full_max_mpix", type=float, default=120, help="max megapixels for full high-res image; larger will be skipped to avoid OOM/crash [default: 120 MP]")
+    p.add_argument("--save_qupath", action="store_true", help="export QuPath-readable GeoJSON (qupath/<basename>.geojson) alongside dat")
     # Cellpose 专属
     p.add_argument("--cellpose_model", default="cpsam", help="cellpose 模型名或路径 [default: cpsam]")
     p.add_argument("--diameter", type=float, default=None, help="cellpose diameter，None 自动")
@@ -125,8 +124,7 @@ def main():
         viz_highres_tile=args.viz_highres_tile,
         viz_highres_mpp=args.viz_highres_mpp,
         viz_highres_max_tiles=args.viz_highres_max_tiles,
-        save_viz_highres_full=args.save_viz_highres_full,
-        viz_highres_full_max_mpix=args.viz_highres_full_max_mpix,
+        save_qupath=args.save_qupath,
         msk_dir=args.msk_dir,
     )
 

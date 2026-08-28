@@ -323,26 +323,22 @@ class App(tk.Tk):
         self._num(R, "nr_post_proc_workers", self._var("nr_post_proc_workers","0"), "0 = serial")
         row = ttk.Frame(sec, style="Card.TFrame"); row.pack(fill="x", pady=(8,2))
         self._bool("save_thumb", False); self._bool("save_mask", False)
-        ttk.Checkbutton(row, text="save_thumb  →  thumb/", variable=self.vars["save_thumb"]).pack(side="left", padx=4)
-        ttk.Checkbutton(row, text="save_mask  →  mask/", variable=self.vars["save_mask"]).pack(side="left", padx=12)
+        tk.Checkbutton(row, text="save_thumb  →  thumb/", variable=self.vars["save_thumb"], bg=CARD, activebackground=CARD, selectcolor="white", fg=FG, activeforeground=FG, font=("Inter", 10), highlightthickness=0, bd=0, anchor="w").pack(side="left", padx=4)
+        tk.Checkbutton(row, text="save_mask  →  mask/", variable=self.vars["save_mask"], bg=CARD, activebackground=CARD, selectcolor="white", fg=FG, activeforeground=FG, font=("Inter", 10), highlightthickness=0, bd=0, anchor="w").pack(side="left", padx=12)
 
     def _add_viz(self):
         sec = self._section("High-res Tiled Visualization", "Native-resolution tiles for zoomed boundary inspection; off by default")
         row = ttk.Frame(sec, style="Card.TFrame"); row.pack(fill="x")
         self._bool("save_viz_highres", False)
-        ttk.Checkbutton(row, text="Enable  →  viz_highres/<basename>/", variable=self.vars["save_viz_highres"]).pack(side="left")
+        tk.Checkbutton(row, text="Enable  →  viz_highres/<basename>/  ✓", variable=self.vars["save_viz_highres"], bg=CARD, activebackground=CARD, selectcolor="white", fg=FG, activeforeground=FG, font=("Inter", 10), highlightthickness=0, bd=0, anchor="w").pack(side="left")
         g = ttk.Frame(sec, style="Card.TFrame"); g.pack(fill="x", pady=6)
         self._num(g, "viz_tile (px)", self._var("viz_highres_tile","2048"), "")
         self._num(g, "viz_mpp (mpp)", self._var("viz_highres_mpp",""), "empty = base mpp (~0.261)")
         self._num(g, "max_tiles", self._var("viz_highres_max_tiles","16"), "-1 = all")
         row2 = ttk.Frame(sec, style="Card.TFrame"); row2.pack(fill="x", pady=(8,2))
-        self._bool("save_viz_highres_full", False)
-        ttk.Checkbutton(row2, text="Also stitch full high-res image (single file) — may OOM for large WSI", variable=self.vars["save_viz_highres_full"]).pack(side="left")
-        row3 = ttk.Frame(sec, style="Card.TFrame"); row3.pack(fill="x", pady=2)
-        ttk.Label(row3, text="full max MP (skip if larger to avoid crash)", style="Card.TLabel", width=34).pack(side="left")
-        ttk.Entry(row3, textvariable=self._var("viz_highres_full_max_mpix","120"), width=10).pack(side="left", padx=6)
-        ttk.Label(row3, text="e.g. 120 MP ≈ 12k×10k", style="Card.TLabel", foreground=MUTED).pack(side="left")
-        ttk.Label(sec, text="Can generate from existing dat without re-inference. Full stitch uses tiled memmap; PNG >60 MP auto saves as BigTIFF.", style="Muted.TLabel", wraplength=540, justify="left").pack(anchor="w", pady=(6,0))
+        self._bool("save_qupath", False)
+        tk.Checkbutton(row2, text="Export QuPath GeoJSON  →  qupath/<basename>.geojson  ✓", variable=self.vars["save_qupath"], bg=CARD, activebackground=CARD, selectcolor="white", fg=FG, activeforeground=FG, font=("Inter", 10), highlightthickness=0, bd=0, anchor="w").pack(side="left")
+        ttk.Label(sec, text="QuPath: open original SVS in QuPath, then drag & drop the .geojson to overlay. No re-inference needed if dat exists.", style="Muted.TLabel", wraplength=540, justify="left").pack(anchor="w", pady=(6,0))
 
     def _add_cellpose(self):
         self.cellpose_frame = self._section("Cellpose Parameters", "cpsam / cyto / cyto2 / cyto3 or local path")
@@ -354,7 +350,7 @@ class App(tk.Tk):
         self._num(g, "min_size", self._var("min_size","15"), "")
         row = ttk.Frame(self.cellpose_frame, style="Card.TFrame"); row.pack(fill="x", pady=4)
         self._bool("use_bfloat16", False)
-        ttk.Checkbutton(row, text="use_bfloat16  (4090 may crash: upsample BFloat16)", variable=self.vars["use_bfloat16"]).pack(side="left")
+        tk.Checkbutton(row, text="use_bfloat16  (4090 may crash: upsample BFloat16)", variable=self.vars["use_bfloat16"], bg=CARD, activebackground=CARD, selectcolor="white", fg=FG, activeforeground=FG, font=("Inter", 10), highlightthickness=0, bd=0, anchor="w").pack(side="left")
 
     def _add_cerberus(self):
         self.cerberus_frame = self._section("Cerberus Parameters", "Gland / Lumen / Nuclei / Patch-Class")
@@ -455,9 +451,8 @@ class App(tk.Tk):
             args += ["--viz_highres_tile", g("viz_highres_tile","2048")]
             if g("viz_highres_mpp"): args += ["--viz_highres_mpp", g("viz_highres_mpp")]
             args += ["--viz_highres_max_tiles", g("viz_highres_max_tiles","16")]
-            if self.vars["save_viz_highres_full"].get():
-                args.append("--save_viz_highres_full")
-                args += ["--viz_highres_full_max_mpix", g("viz_highres_full_max_mpix","120")]
+        if self.vars["save_qupath"].get():
+            args.append("--save_qupath")
         if m == "cellpose":
             args += ["--cellpose_model", g("cellpose_model","cpsam")]
             if g("diameter"): args += ["--diameter", g("diameter")]

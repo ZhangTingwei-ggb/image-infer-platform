@@ -445,7 +445,7 @@ class CellposeWSI:
                                    diameter=None, bsize=256, tile_overlap=0.1,
                                    nr_post_proc_workers=0,
                                    save_viz_highres=False, viz_highres_tile=2048, viz_highres_mpp=None, viz_highres_max_tiles=16,
-                                   save_viz_highres_full=False, viz_highres_full_max_mpix=120):
+                                   save_qupath=False):
         """轻量 direct 模式 — 推荐"""
         from concurrent.futures import ProcessPoolExecutor, as_completed
         resolution = {"resolution": wsi_proc_mag, "units": "mpp"}
@@ -710,80 +710,49 @@ class CellposeWSI:
                     cv2.imwrite(out_path_hr, canvas_hr)
                 self.logger.info(f"Saved {len(candidates)} highres viz tiles to {hr_root}")
                 # Optional: stitched full high-res image (single file)
-                if save_viz_highres_full:
+                # QuPath GeoJSON export (base coordinates)
+                if save_qupath:
                     try:
-                        mpix = viz_w * viz_h / 1e6
-                        limit = float(viz_highres_full_max_mpix)
-                        if mpix > limit:
-                            self.logger.warning(f"Skip full high-res stitch: {viz_w}x{viz_h} = {mpix:.1f} MP > limit {limit:.1f} MP. Increase --viz_highres_full_max_mpix or use tiled viz. To avoid OOM/crash.")
-                        else:
-                            # Estimate RAM: viz_h*viz_w*3 bytes
-                            est_gb = viz_w * viz_h * 3 / (1024**3)
-                            self.logger.info(f"Stitching full high-res {viz_w}x{viz_h} ({mpix:.1f} MP, ~{est_gb:.2f} GB) ...")
-                            # Use memmap to avoid RAM spike, then stream tiles into it
-                            import tempfile
-                            tmp_mmap = os.path.join(hr_root, f"_tmp_full_{basename}.dat")
-                            full = np.memmap(tmp_mmap, dtype=np.uint8, mode='w+', shape=(viz_h, viz_w, 3))
-                            # Fill by re-reading tiles (all, not sampled) and drawing
-                            # Build full candidates (all tiles, not sampled)
-                            xs_all = list(range(0, viz_w, tile))
-                            ys_all = list(range(0, viz_h, tile))
-                            full_cands = []
-                            for yy in ys_all:
-                                for xx in xs_all:
-                                    x1 = min(xx+tile, viz_w); y1 = min(yy+tile, viz_h)
-                                    px0, py0 = int(xx/scale), int(yy/scale)
-                                    px1, py1 = int(x1/scale), int(y1/scale)
-                                    if px1<=px0 or py1<=py0: continue
-                                    if np.sum(wsi_mask[py0:py1, px0:px1]) == 0: continue
-                                    full_cands.append((xx,yy,x1,y1))
-                            self.logger.info(f"Full stitch: {len(full_cands)} tiles")
-                            rdr_full = WSIReader.open(wsi_path)
-                            for tx,ty,tx1,ty1 in tqdm.tqdm(full_cands, desc="Stitch full highres", ncols=90):
-                                w,h = tx1-tx, ty1-ty
-                                try:
-                                    img_hr = rdr_full.read_rect(location=(tx,ty), size=(w,h), resolution=viz_mpp, units="mpp", coord_space="resolution")
-                                    if img_hr.shape[-1]==4: img_hr=img_hr[...,:3]
-                                    canvas = cv2.cvtColor(img_hr, cv2.COLOR_RGB2BGR)
-                                except Exception:
-                                    try:
-                                        img_hr = rdr_full.read_rect(location=(tx,ty), size=(w,h), resolution=viz_mpp, units="mpp")
-                                        if img_hr.shape[-1]==4: img_hr=img_hr[...,:3]
-                                        canvas = cv2.cvtColor(img_hr, cv2.COLOR_RGB2BGR)
-                                    except Exception as e2:
-                                        continue
-                                # draw intersecting contours
-                                for (viz_box, cnt_scaled) in scaled_items:
-                                    if viz_box[1][0] < tx or viz_box[0][0] > tx1 or viz_box[1][1] < ty or viz_box[0][1] > ty1: continue
-                                    pts = (cnt_scaled - np.array([tx,ty])).astype(np.int32)
-                                    if pts[:,0].max()<0 or pts[:,0].min()>=w or pts[:,1].max()<0 or pts[:,1].min()>=h: continue
-                                    cv2.polylines(canvas, [pts], True, (0,255,0), 1)
-                                full[ty:ty1, tx:tx1] = canvas
-                            # flush and save as tiled BigTIFF then PNG? Use cv2.imwrite via memmap->array may still OOM, so write as BigTIFF then optionally PNG if small
-                            full.flush()
-                            out_full = os.path.join(os.path.dirname(hr_root), f"{basename}_full_{viz_mpp:.3f}mpp.png")
-                            # If image is huge, prefer TIFF to avoid PNG 2GB limit; use tifffile
-                            if mpix > 60:
-                                out_full = out_full.replace(".png", ".tiff")
-                                try:
-                                    import tifffile
-                                    # tifffile can write big images from memmap incrementally? write directly
-                                    tifffile.imwrite(out_full, np.array(full), tile=(512,512), bigtiff=True, compression='lzw')
-                                    self.logger.info(f"Saved full high-res BigTIFF to {out_full}")
-                                except Exception as e:
-                                    self.logger.warning(f"tifffile BigTIFF failed {e}, fallback to cv2")
-                                    cv2.imwrite(out_full, np.array(full))
-                                    self.logger.info(f"Saved full high-res to {out_full}")
-                            else:
-                                cv2.imwrite(out_full, np.array(full))
-                                self.logger.info(f"Saved full high-res to {out_full}")
-                            # cleanup memmap
-                            del full
-                            try: os.remove(tmp_mmap)
-                            except: pass
-                    except Exception as e:
-                        import traceback
-                        self.logger.warning(f"full highres stitch failed: {e}\n{traceback.format_exc()}")
+                        import json, pathlib as _pl
+                        from seg_core.core.exporter import save_qupath_geojson_from_dat as _qg  # seg_platform path
+                    except Exception:
+                        try:
+                            from platform.core.exporter import save_qupath_geojson_from_dat as _qg
+                        except Exception:
+                            _qg=None
+                    # fallback inline if exporter not available (e.g. source run_wsi_cellpose.py)
+                    if _qg is None:
+                        try:
+                            import json as _js
+                            base_mpp = float(__import__("numpy").array(out["base_resolution"]["resolution"]).flat[0]) if isinstance(out["base_resolution"]["resolution"], (list, __import__("numpy").ndarray)) else float(out["base_resolution"]["resolution"])
+                            proc_mpp = float(__import__("numpy").array(out["proc_resolution"]["resolution"]).flat[0]) if isinstance(out["proc_resolution"]["resolution"], (list, __import__("numpy").ndarray)) else float(out["proc_resolution"]["resolution"])
+                            scale_q = proc_mpp/base_mpp if base_mpp else 1.0
+                            qdir = __import__("os").path.join(__import__("os").path.dirname(__import__("os").path.dirname(output_path)) if "dat" in output_path else __import__("os").path.dirname(output_path), "qupath")
+                            __import__("os").makedirs(qdir, exist_ok=True)
+                            qpath = __import__("os").path.join(qdir, f"{basename}.geojson")
+                            feats=[]
+                            for _cls in ["Nuclei","Gland","Lumen"]:
+                                _d=out.get(_cls, {}) or out.get(_cls.lower(), {})
+                                for _uid,_inst in _d.items():
+                                    _cnt=__import__("numpy").array(_inst.get("contour", []), dtype=float)
+                                    if _cnt.size==0 or _cnt.shape[0]<3: continue
+                                    if scale_q!=1.0: _cnt=_cnt*scale_q
+                                    _pts=_cnt.tolist()
+                                    if _pts[0]!=_pts[-1]: _pts.append(_pts[0])
+                                    feats.append({"type":"Feature","geometry":{"type":"Polygon","coordinates":[_pts]},"properties":{"classification":{"name":_cls},"objectType":"annotation"}})
+                            _js.dump({"type":"FeatureCollection","features":feats}, open(qpath,"w",encoding="utf-8"))
+                            self.logger.info(f"Saved QuPath GeoJSON {len(feats)} features to {qpath}")
+                        except Exception as e:
+                            import traceback
+                            self.logger.warning(f"QuPath export failed: {e}\n{traceback.format_exc()}")
+                    else:
+                        try:
+                            qdir = __import__("os").path.join(__import__("os").path.dirname(__import__("os").path.dirname(output_path)) if "dat" in output_path else __import__("os").path.dirname(output_path), "qupath")
+                            # _qg expects dat_path and output_dir
+                            _qg(output_path, __import__("os").path.dirname(qdir), logger=self.logger)
+                        except Exception as e:
+                            import traceback
+                            self.logger.warning(f"QuPath export via exporter failed: {e}\n{traceback.format_exc()}")
             except Exception as e:
                 import traceback
                 self.logger.warning(f"highres viz failed: {e}\n{traceback.format_exc()}")
@@ -795,7 +764,7 @@ class CellposeWSI:
                          diameter=None, save_thumb=False, save_mask=False,
                          nr_post_proc_workers=0, logging_dir=None,
                          save_viz_highres=False, viz_highres_tile=2048, viz_highres_mpp=None, viz_highres_max_tiles=16,
-                         save_viz_highres_full=False, viz_highres_full_max_mpix=120):
+                         save_qupath=False):
         os.makedirs(output_dir, exist_ok=True)
         os.makedirs(f"{output_dir}/dat", exist_ok=True)
         if save_thumb: os.makedirs(f"{output_dir}/thumb", exist_ok=True)
@@ -825,6 +794,39 @@ class CellposeWSI:
             out_path = f"{output_dir}/dat/{basename}.dat"
             if os.path.exists(out_path):
                 self.logger.info(f"Skip existing {basename}")
+                # qupath補画：已有dat但未导出geojson时补出
+                if save_qupath:
+                    try:
+                        qpath = os.path.join(output_dir, "qupath", f"{basename}.geojson")
+                        if not os.path.exists(qpath):
+                            self.logger.info(f"Backfill QuPath for {basename}")
+                            # reuse exporter or inline
+                            try:
+                                from seg_core.core.exporter import save_qupath_geojson_from_dat
+                                save_qupath_geojson_from_dat(out_path, output_dir, logger=self.logger)
+                            except Exception:
+                                # inline fallback
+                                import json, joblib, numpy as np
+                                info=joblib.load(out_path)
+                                proc_mpp=float(np.array(info["proc_resolution"]["resolution"]).flat[0]) if isinstance(info["proc_resolution"]["resolution"], (list, np.ndarray)) else float(info["proc_resolution"]["resolution"])
+                                base_mpp=float(np.array(info["base_resolution"]["resolution"]).flat[0]) if isinstance(info["base_resolution"]["resolution"], (list, np.ndarray)) else float(info["base_resolution"]["resolution"])
+                                scale=proc_mpp/base_mpp if base_mpp else 1.0
+                                os.makedirs(os.path.join(output_dir,"qupath"), exist_ok=True)
+                                feats=[]
+                                for _cls in ["Nuclei","Gland","Lumen"]:
+                                    _d=info.get(_cls, {}) or info.get(_cls.lower(),{})
+                                    for _uid,_inst in _d.items():
+                                        _cnt=np.array(_inst.get("contour",[]),dtype=float)
+                                        if _cnt.size==0 or _cnt.shape[0]<3: continue
+                                        if scale!=1.0: _cnt=_cnt*scale
+                                        _pts=_cnt.tolist()
+                                        if _pts[0]!=_pts[-1]: _pts.append(_pts[0])
+                                        feats.append({"type":"Feature","geometry":{"type":"Polygon","coordinates":[_pts]},"properties":{"classification":{"name":_cls},"objectType":"annotation"}})
+                                json.dump({"type":"FeatureCollection","features":feats}, open(qpath,"w",encoding="utf-8"))
+                                self.logger.info(f"Saved QuPath GeoJSON {len(feats)} to {qpath}")
+                    except Exception as e:
+                        import traceback
+                        self.logger.warning(f"QuPath backfill failed {e}\\n{traceback.format_exc()}")
                 # 高分辨率分块 viz 补生成（原图分辨率）
                 if save_viz_highres:
                     hr_root = os.path.join(output_dir, "viz_highres", basename)
@@ -917,7 +919,7 @@ class CellposeWSI:
                 cellprob_threshold=cellprob_threshold, min_size=min_size,
                 diameter=diameter, nr_post_proc_workers=nr_post_proc_workers,
                 save_viz_highres=save_viz_highres, viz_highres_tile=viz_highres_tile, viz_highres_mpp=viz_highres_mpp, viz_highres_max_tiles=viz_highres_max_tiles,
-                save_viz_highres_full=save_viz_highres_full, viz_highres_full_max_mpix=viz_highres_full_max_mpix
+                save_qupath=save_qupath
             )
 
 

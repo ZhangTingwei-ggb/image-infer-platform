@@ -133,8 +133,7 @@ def parse_args():
     p.add_argument("--viz_highres_tile", type=int, default=2048, help="高分辨率分块边长 (像素)，默认 2048")
     p.add_argument("--viz_highres_mpp", type=float, default=None, help="高分辨率 mpp，默认用原图 base mpp (约 0.25)，越小越清晰")
     p.add_argument("--viz_highres_max_tiles", type=int, default=16, help="最多生成多少高分辨率小图，-1 不限，默认 16 均匀采样")
-    p.add_argument("--save_viz_highres_full", action="store_true", help="同时合成一张完整高分辨率全图（大 WSI 可能 OOM，见 --viz_highres_full_max_mpix）")
-    p.add_argument("--viz_highres_full_max_mpix", type=float, default=120, help="完整高分辨率图最大 MP，超过则跳过以免崩溃 [default: 120]")
+    p.add_argument("--save_qupath", action="store_true", help="导出 QuPath GeoJSON (qupath/<basename>.geojson)")
     p.add_argument("--batch_size", type=int, default=8, help="cellpose eval batch")
     p.add_argument("--nr_post_proc_workers", type=int, default=0, help="后处理并行 (direct 模式建议 0)")
     p.add_argument("--use_bfloat16", action="store_true", help="强制 bfloat16 (4090 上会触发 upsample bug，默认 float32)")
@@ -222,8 +221,7 @@ def main():
         viz_highres_tile=args.viz_highres_tile,
         viz_highres_mpp=args.viz_highres_mpp,
         viz_highres_max_tiles=args.viz_highres_max_tiles,
-        save_viz_highres_full=args.save_viz_highres_full,
-        viz_highres_full_max_mpix=args.viz_highres_full_max_mpix,
+        save_qupath=args.save_qupath,
     )
     print("Done.")
 

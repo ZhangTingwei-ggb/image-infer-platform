@@ -53,6 +53,7 @@ class CellposeAdapter(BaseAdapter):
             viz_highres_tile=kwargs.get("viz_highres_tile", 2048),
             viz_highres_mpp=kwargs.get("viz_highres_mpp"),
             viz_highres_max_tiles=kwargs.get("viz_highres_max_tiles", 16),
+            save_qupath=kwargs.get("save_qupath", False),
         )
 
     def get_info(self):

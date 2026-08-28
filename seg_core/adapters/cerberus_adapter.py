@@ -118,6 +118,25 @@ class CerberusAdapter(BaseAdapter):
                     )
                 except Exception as e:
                     print(f"[cerberus viz_highres] {basename} failed: {e}")
+        # QuPath GeoJSON
+        if bool(kwargs.get("save_qupath", False)):
+            from seg_core.core.exporter import save_qupath_geojson_from_dat
+            for wsi_path, mask_path in zip(wsi_list, mask_list or [None]*len(wsi_list)):
+                basename = pathlib.Path(wsi_path).stem
+                dat_path = os.path.join(output_dir, "dat", f"{basename}.dat")
+                if not os.path.isfile(dat_path):
+                    alt = glob.glob(os.path.join(output_dir, "dat", basename + ".*"))
+                    if alt:
+                        dat_path = alt[0]
+                    else:
+                        continue
+                qpath = os.path.join(output_dir, "qupath", f"{basename}.geojson")
+                if os.path.isfile(qpath):
+                    continue
+                try:
+                    save_qupath_geojson_from_dat(dat_path, output_dir)
+                except Exception as e:
+                    print(f"[cerberus qupath] {basename} failed: {e}")
 
     def get_info(self):
         return {"name": "Cerberus", "model_dir": self.model_dir, "supports_wsi": True}
