@@ -1,0 +1,66 @@
+dataset_kwargs:
+  class_input_shape: 144
+  input_shape: 448
+  output_shape: 448
+  req_target_code:
+    Gland-INST: IP-ERODED-CONTOUR-11
+    Lumen-INST: IP-ERODED-CONTOUR-3
+    Nuclei-INST: IP-ERODED-CONTOUR-3
+    Nuclei-TYPE: TP
+    Patch-Class: PC
+loader_kwargs:
+  test:
+    batch_size: 24
+    nr_procs: 0
+  train:
+    batch_size: 24
+    nr_procs: 0
+  valid:
+    batch_size: 24
+    nr_procs: 0
+loss_kwargs:
+  Gland-INST:
+    loss:
+      ce: 1
+    weight: 0
+  Lumen-INST:
+    loss:
+      ce: 1
+    weight: 0
+  Nuclei-INST:
+    loss:
+      ce: 1
+    weight: 0
+  Nuclei-TYPE:
+    loss:
+      ce: 1
+      dice: 1
+    weight: 0
+  Patch-Class:
+    loss:
+      ce: 1
+    weight: 0
+model_kwargs:
+  backbone_imagenet_pretrained: false
+  decoder_kwargs:
+    Gland:
+      INST: 3
+    Lumen:
+      INST: 3
+    Nuclei:
+      INST: 3
+    Nuclei#TYPE:
+      TYPE: 7
+    Patch-Class:
+      OUT: 9
+  encoder_backbone_name: resnet34
+  fullnet_custom_pretrained: true
+  considered_tasks: ["Nuclei", "Nuclei#TYPE", "Gland", "Lumen", "Patch-Class"]
+optimizer_kwargs:
+  betas:
+  - 0.9
+  - 0.999
+  lr: 0.001
+  weight_decay: 0.0
+seed: 5
+

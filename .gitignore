@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.DS_Store
+.vscode/
+.idea/
+*.log
+# 大文件 - GitHub 100M限制，需单独下载或用 LFS
+models/cerberus/pretrained_weights/resnet34_cerberus/weights.tar
+models/cerberus/pretrained_weights/**/*.pth
+# 如需本地大文件，取消注释下一行
+# *.tar
+# *.zip

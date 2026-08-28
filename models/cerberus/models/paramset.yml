@@ -1,0 +1,62 @@
+# loss weighting and batch size may be different to original publication
+
+loader_kwargs:
+  train: {batch_size : 8, nr_procs: 16}
+  valid: {batch_size : 8, nr_procs: 8}
+  test : {batch_size : 8, nr_procs: 8}
+
+optimizer_kwargs:
+  'lr' : 1e-4
+  'betas' : [0.9, 0.999]
+  'weight_decay' : 1e-4
+
+#?????是不是没用上在run_train.py里没有用到
+lr_scheduler_kwargs:
+  'type': 'CosineAnnealingLR'
+  'T_max': 140
+  'eta_min': 1e-6
+
+#?????是不是没用上在run_train.py里没有用到
+grad_clip_kwargs:
+  'max_norm': 1
+
+loss_kwargs:
+  loss_info:
+    'Gland-INST'  : {'weight': 1.4, "loss" : {"ce": 1}}
+    'Nuclei-INST' : {'weight': 1, "loss" : {"ce": 1}}
+    'Nuclei-TYPE' : {'weight': 0, "loss" : {"ce": 1, "dice": 1}}
+    'Patch-Class' : {'weight': 0.4, "loss" : {"ce": 1}}
+  class_weight:
+    'Nuclei-TYPE':
+      0: 1
+      1: 2
+      2: 1.5
+      3: 3
+      4: 2.5
+      5: 1
+      6: 1
+
+dataset_kwargs:
+  input_shape: 448
+  output_shape: 448
+  class_input_shape: 144
+  req_target_code: 
+    'Gland-INST' : 'IP'
+    'Nuclei-INST': 'IP'
+    #'Gland-INST' : 'IP-ERODED-CONTOUR-11'
+    #'Nuclei-INST': 'IP-ERODED-CONTOUR-3'
+    'Nuclei-TYPE': 'TP'
+    'Patch-Class': 'PC'
+
+model_kwargs:
+  encoder_backbone_name: resnet34
+  considered_tasks: ['Gland', 'Nuclei', 'Nuclei#TYPE', 'Patch-Class']
+  decoder_kwargs:  
+    'Gland': 
+        'INST': 3
+    'Nuclei':
+        'INST': 3
+    'Nuclei#TYPE':
+        'TYPE': 7
+    'Patch-Class':
+        'OUT': 9
