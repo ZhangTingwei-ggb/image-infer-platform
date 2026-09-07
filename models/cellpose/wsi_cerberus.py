@@ -205,6 +205,11 @@ def _process_cellpose_tile(
 
     inst_dict = get_inst_info_dict(inst_map, min_size=min_size)
     if len(inst_dict) == 0:
+        try:
+            _direct_tile_eval_process._last_infer = _t_infer_e - _t_infer_s
+            _direct_tile_eval_process._last_post = time.perf_counter() - _t_post_s
+        except Exception:
+            pass
         return {}, []
 
     # --- Cerberus 模糊边界去重逻辑 (完全复刻) ---
@@ -353,14 +358,20 @@ def _direct_tile_eval_process(
         return {}, []
 
     # cellpose eval (内部自带 tiling with tile_overlap/bsize)
+    _t_infer_s = time.perf_counter()
     masks, flows, styles = model.eval(
         img, diameter=diameter, flow_threshold=flow_threshold,
         cellprob_threshold=cellprob_threshold, min_size=min_size,
         tile_overlap=tile_overlap, bsize=bsize
     )
     # model.eval 返回 masks 2D
+    _t_infer_e = time.perf_counter()
     if masks is None or masks.size == 0 or masks.max() == 0:
+        # store timing in thread-local? use function attribute
+        _direct_tile_eval_process._last_infer = _t_infer_e - _t_infer_s
+        _direct_tile_eval_process._last_post = 0.0
         return {}, []
+    _t_post_s = time.perf_counter()
     inst_dict = get_inst_info_dict(masks, min_size=min_size)
     if len(inst_dict) == 0:
         return {}, []
@@ -408,7 +419,12 @@ def _direct_tile_eval_process(
         info["centroid"] = info["centroid"] + tile_tl
         info["contour"] = info["contour"] + tile_tl
         new_inst_dict[uuid.uuid4().hex] = info
-
+    # record split for outer accumulation
+    try:
+        _direct_tile_eval_process._last_infer = _t_infer_e - _t_infer_s
+        _direct_tile_eval_process._last_post = time.perf_counter() - _t_post_s
+    except Exception:
+        pass
     return new_inst_dict, remove_in_orig
 
 
@@ -440,12 +456,14 @@ class CellposeWSI:
         return NucleusInstanceSegmentor.merge_prediction(canvas_shape, predictions, locations, save_path, cache_count_path)
 
     def process_single_wsi_direct(self, wsi_path, output_path, mask_path=None,
-                                   wsi_proc_mag=0.5, tile_shape=4096, ambiguous_size=64,
+                                   wsi_proc_mag=0.5, tile_shape=4096, chunk_shape=6000, ambiguous_size=64,
                                    flow_threshold=0.4, cellprob_threshold=0.0, min_size=15,
                                    diameter=None, bsize=256, tile_overlap=0.1,
                                    nr_post_proc_workers=0,
+                                   patch_input_shape=512, patch_output_shape=512,
+                                   cache_dir=None,
                                    save_viz_highres=False, viz_highres_tile=2048, viz_highres_mpp=None, viz_highres_max_tiles=16,
-                                   save_qupath=False):
+                                   save_qupath=False, qupath_split=None, qupath_no_clean=False, use_cerberus_infer=False):
         """轻量 direct 模式 — 推荐"""
         from concurrent.futures import ProcessPoolExecutor, as_completed
         resolution = {"resolution": wsi_proc_mag, "units": "mpp"}
@@ -474,6 +492,23 @@ class CellposeWSI:
         else:
             wsi_mask = np.ones(wsi_proc_shape_yx, dtype=np.uint8)
 
+        # === Cerberus-style two-phase (chunk infer + tile postproc) ===
+        # When use_cerberus_infer=True, do chunk-batched inference with flow memmap, then tile stitching.
+        # Otherwise fall back to direct per-4096 eval (legacy). Controlled by CLI --use_cerberus_infer
+        if use_cerberus_infer:
+            import tempfile, shutil
+            from tiatoolbox.tools.patchextraction import PatchExtractor
+            # inference ioconfig (large chunk) and postproc ioconfig (small tile)
+            # use chunk_shape for inference batching; 6000 is small enough for diameter auto, better than 15000
+            chunk_shape_eff = int(chunk_shape) if chunk_shape else 6000
+            # ensure chunk is multiple of patch_output
+            ioconfig = IOSegmentorConfig(
+                input_resolutions=[{"units":"mpp","resolution": wsi_proc_mag}],
+                output_resolutions=[{"units":"mpp","resolution": wsi_proc_mag}],
+                margin=ambiguous_size, tile_shape=[chunk_shape_eff, chunk_shape_eff],
+                patch_input_shape=[patch_input_shape, patch_input_shape], patch_output_shape=[patch_output_shape, patch_output_shape],
+                stride_shape=[patch_output_shape, patch_output_shape], save_resolution=resolution
+            )
         ioconfig_pp = IOSegmentorConfig(
             input_resolutions=[{"units":"mpp","resolution": wsi_proc_mag}],
             output_resolutions=[{"units":"mpp","resolution": wsi_proc_mag}],
@@ -568,6 +603,99 @@ class CellposeWSI:
             info.append([_boxes, _flag])
             return list(info)
 
+        if use_cerberus_infer:
+            # ---- Phase 1: chunk-batched inference -> global flow memmap ----
+            t_infer0 = time.perf_counter()
+            # prepare patch coordinates for whole WSI at proc resolution
+            (patch_inputs, patch_outputs) = PatchExtractor.get_coordinates(
+                image_shape=np.array(wsi_proc_shape),  # XY
+                patch_input_shape=np.array([patch_input_shape, patch_input_shape]),
+                patch_output_shape=np.array([patch_output_shape, patch_output_shape]),
+                stride_shape=np.array([patch_output_shape, patch_output_shape]),
+            )
+            # filter by tissue mask via VirtualWSIReader
+            try:
+                from tiatoolbox.wsicore.wsireader import VirtualWSIReader
+                mask_reader = VirtualWSIReader(wsi_mask, mode="bool")
+                mask_reader.info = wsi_reader.info
+                from tiatoolbox.models import NucleusInstanceSegmentor as _NIS
+                sel = _NIS.filter_coordinates(mask_reader, patch_outputs, **resolution)
+                patch_inputs = patch_inputs[sel]
+                patch_outputs = patch_outputs[sel]
+            except Exception:
+                pass
+            # global flow memmap [H,W,3] dP(2)+cellprob(1)
+            _cache_dir = cache_dir or os.path.join(os.path.dirname(os.path.dirname(output_path)) if "dat" in output_path else os.path.dirname(output_path), "cache")
+            os.makedirs(_cache_dir, exist_ok=True)
+            flow_path = os.path.join(_cache_dir, f"flow_{pathlib.Path(wsi_path).stem}.npy")
+            count_path = os.path.join(_cache_dir, f"count_{pathlib.Path(wsi_path).stem}.npy")
+            # init memmaps
+            _flow = np.lib.format.open_memmap(flow_path, mode="w+", dtype=np.float32, shape=(wsi_proc_shape_yx[0], wsi_proc_shape_yx[1], 3))
+            _count = np.lib.format.open_memmap(count_path, mode="w+", dtype=np.float32, shape=(wsi_proc_shape_yx[0], wsi_proc_shape_yx[1]))
+            _flow[:] = 0; _count[:] = 0
+            # chunk tiles (grid only) for batched inference
+            chunk_sets = _get_tile_sets(wsi_proc_shape, ioconfig)
+            chunk_bounds = chunk_sets[0][0]  # grid only
+            # build patch STRtree for fast chunk->patch lookup
+            _geoms = [shapely_box(*b) for b in patch_outputs]
+            _rt = STRtree(_geoms)
+            self.logger.info(f"Cerberus-infer: {len(chunk_bounds)} chunks, {len(patch_inputs)} patches, chunk={chunk_shape_eff}, patch={patch_input_shape}")
+            for c_idx, cb in enumerate(tqdm.tqdm(chunk_bounds, desc="Infer chunks", ncols=90)):
+                # patches whose output lies inside this chunk
+                sel_box = shapely_box(*cb)
+                sels = _rtree_query_indices(_rt, _geoms, sel_box)
+                if not sels:
+                    continue
+                c_patch_ins = patch_inputs[sels]
+                c_patch_outs = patch_outputs[sels]
+                # batch read & infer per patch (cellpose eval per patch)
+                preds = []
+                locs = []
+                for pi, po in zip(c_patch_ins, c_patch_outs):
+                    x0,y0,x1,y1 = po  # output location XY
+                    w,h = int(x1-x0), int(y1-y0)
+                    try:
+                        img = wsi_reader.read_rect(location=(int(x0),int(y0)), size=(w,h), resolution=wsi_proc_mag, units="mpp", coord_space="resolution")
+                        if img.shape[-1]==4: img=img[...,:3]
+                    except Exception:
+                        try:
+                            img = wsi_reader.read_rect(location=(int(x0),int(y0)), size=(w,h), resolution=wsi_proc_mag, units="mpp")
+                            if img.shape[-1]==4: img=img[...,:3]
+                        except Exception:
+                            continue
+                    if img.size==0: continue
+                    # cellpose per patch
+                    masks, flows, styles = self.model.eval(img, diameter=diameter, flow_threshold=flow_threshold, cellprob_threshold=cellprob_threshold, min_size=min_size, tile_overlap=tile_overlap, bsize=bsize)
+                    # flows: [dP(2,H,W), cellprob(H,W)] or similar; fallback to zeros
+                    try:
+                        dP = flows[0]  # 2xHxW
+                        if isinstance(dP, np.ndarray) and dP.ndim==3:
+                            dP = dP.transpose(1,2,0)  # HxWx2
+                        else:
+                            dP = np.zeros((h,w,2), dtype=np.float32)
+                        cp = flows[1] if len(flows)>1 else np.zeros((h,w), dtype=np.float32)
+                        if cp.ndim==3: cp=cp[0]
+                    except Exception:
+                        dP = np.zeros((h,w,2), dtype=np.float32)
+                        cp = np.zeros((h,w), dtype=np.float32)
+                    pred = np.concatenate([dP, cp[...,None]], axis=-1)  # HxWx3
+                    preds.append(pred)
+                    locs.append(np.array([x0,y0,x1,y1]))
+                if preds:
+                    self._merge_predictions(wsi_proc_shape_yx, preds, locs, flow_path, count_path)
+            t_infer1 = time.perf_counter()
+            self.logger.info(f"Inference Time: {t_infer1 - t_infer0:.2f}s ({len(chunk_bounds)} chunks, {len(patch_inputs)} patches)")
+            # ---- Phase 2: tile stitching from flow memmap (same as Cerberus postproc) ----
+            t_post0 = time.perf_counter()
+            # reuse existing tile_info_sets for postproc (4096 4 types) built below, but need to run _process_cellpose_tile per tile from flow_path
+            # Fall through to shared postproc loop below; set flag to use flow_path
+            _use_flow_memmap = True
+            _flow_path_global = flow_path
+            _count_path_global = count_path
+        else:
+            _use_flow_memmap = False
+            _flow_path_global = _count_path_global = None
+            t_post0 = None
         tile_info_sets = _get_tile_sets(wsi_proc_shape, ioconfig_pp)
 
         pool = None
@@ -576,6 +704,8 @@ class CellposeWSI:
 
         inst_dict = {}
         t0 = time.perf_counter()
+        t_infer_direct = 0.0
+        t_post_direct = 0.0
         total_tiles = sum(len(b) for b,_ in tile_info_sets)
         self.logger.info(f"WSI {wsi_proc_shape} -> {len(tile_info_sets)} sets, {total_tiles} tiles (tile_shape={tile_shape}, ambiguous={ambiguous_size})")
         # 进度条：按 Cerberus 风格，每 set 一个 tqdm
@@ -600,10 +730,22 @@ class CellposeWSI:
                     pbar.update(1); continue
                 if np.sum(wsi_mask[y0c:y1c, x0c:x1c]) == 0:
                     pbar.update(1); continue
-                args = (ioconfig_pp, tile_bounds, tile_flag, set_idx, inst_dict, wsi_reader, self.model, resolution, flow_threshold, cellprob_threshold, min_size, diameter, bsize, tile_overlap, self.device)
-                # 暂不支持直接 pool (WSIReader 不可 pickle), 故串行
-                t_tile = time.perf_counter()
-                new_dict, remove_list = _direct_tile_eval_process(*args)
+                if _use_flow_memmap:
+                    # Cerberus-style: crop from global flow memmap
+                    args = (ioconfig_pp, tile_bounds, tile_flag, set_idx, inst_dict, _flow_path_global, None, flow_threshold, cellprob_threshold, min_size, 200, self.device)
+                    # _process_cellpose_tile signature: (ioconfig, tile_bounds, tile_flag, tile_mode, ref_inst_dict, cache_flow_path, cache_prob_path, ...)
+                    # we call it directly
+                    t_tile = time.perf_counter()
+                    new_dict, remove_list = _process_cellpose_tile(*args)
+                else:
+                    args = (ioconfig_pp, tile_bounds, tile_flag, set_idx, inst_dict, wsi_reader, self.model, resolution, flow_threshold, cellprob_threshold, min_size, diameter, bsize, tile_overlap, self.device)
+                    t_tile = time.perf_counter()
+                    new_dict, remove_list = _direct_tile_eval_process(*args)
+                    try:
+                        t_infer_direct += getattr(_direct_tile_eval_process, '_last_infer', 0.0)
+                        t_post_direct += getattr(_direct_tile_eval_process, '_last_post', max(0.0, time.perf_counter()-t_tile - getattr(_direct_tile_eval_process, '_last_infer', 0.0)))
+                    except Exception:
+                        pass
                 # 合并
                 inst_dict.update(new_dict)
                 for uid in remove_list:
@@ -612,6 +754,18 @@ class CellposeWSI:
                 self.logger.debug(f"tile {tile_bounds.tolist()} -> +{len(new_dict)} -{len(remove_list)} = {len(inst_dict)} in {time.perf_counter()-t_tile:.2f}s")
             pbar.close()
             self.logger.info(f"Tile set {set_idx} ({set_name}) done, current instances {len(inst_dict)}")
+        if not _use_flow_memmap:
+            self.logger.info(f"Inference Time: {t_infer_direct:.2f}s (direct, {total_tiles} tiles, model.eval only)")
+            self.logger.info(f"Nuclei Post Proc Time: {t_post_direct:.2f}s (direct, STRtree dedup + contour)")
+            self.logger.info(f"Total Time: {t_infer_direct + t_post_direct:.2f}s (Inference {t_infer_direct/(t_infer_direct+t_post_direct)*100:.1f}% | PostProc {t_post_direct/(t_infer_direct+t_post_direct)*100:.1f}%)" if (t_infer_direct+t_post_direct)>0 else "Total Time: 0s")
+        if _use_flow_memmap and set_idx == len(tile_info_sets)-1 and t_post0 is not None:
+            self.logger.info(f"Nuclei Post Proc Time: {time.perf_counter() - t_post0:.2f}s")
+            # cleanup flow memmap if needed (keep for debug)
+            try:
+                # del _flow  # keep file for future viz if needed
+                pass
+            except Exception:
+                pass
 
         # 保存
         wsi_inst_info = inst_dict
@@ -709,62 +863,28 @@ class CellposeWSI:
                     out_path_hr = os.path.join(hr_root, f"{basename}_x{tx}_y{ty}_w{w}_h{h}.png")
                     cv2.imwrite(out_path_hr, canvas_hr)
                 self.logger.info(f"Saved {len(candidates)} highres viz tiles to {hr_root}")
-                # Optional: stitched full high-res image (single file)
-                # QuPath GeoJSON export (base coordinates)
-                if save_qupath:
-                    try:
-                        import json, pathlib as _pl
-                        from seg_core.core.exporter import save_qupath_geojson_from_dat as _qg  # seg_platform path
-                    except Exception:
-                        try:
-                            from platform.core.exporter import save_qupath_geojson_from_dat as _qg
-                        except Exception:
-                            _qg=None
-                    # fallback inline if exporter not available (e.g. source run_wsi_cellpose.py)
-                    if _qg is None:
-                        try:
-                            import json as _js
-                            base_mpp = float(__import__("numpy").array(out["base_resolution"]["resolution"]).flat[0]) if isinstance(out["base_resolution"]["resolution"], (list, __import__("numpy").ndarray)) else float(out["base_resolution"]["resolution"])
-                            proc_mpp = float(__import__("numpy").array(out["proc_resolution"]["resolution"]).flat[0]) if isinstance(out["proc_resolution"]["resolution"], (list, __import__("numpy").ndarray)) else float(out["proc_resolution"]["resolution"])
-                            scale_q = proc_mpp/base_mpp if base_mpp else 1.0
-                            qdir = __import__("os").path.join(__import__("os").path.dirname(__import__("os").path.dirname(output_path)) if "dat" in output_path else __import__("os").path.dirname(output_path), "qupath")
-                            __import__("os").makedirs(qdir, exist_ok=True)
-                            qpath = __import__("os").path.join(qdir, f"{basename}.geojson")
-                            feats=[]
-                            for _cls in ["Nuclei","Gland","Lumen"]:
-                                _d=out.get(_cls, {}) or out.get(_cls.lower(), {})
-                                for _uid,_inst in _d.items():
-                                    _cnt=__import__("numpy").array(_inst.get("contour", []), dtype=float)
-                                    if _cnt.size==0 or _cnt.shape[0]<3: continue
-                                    if scale_q!=1.0: _cnt=_cnt*scale_q
-                                    _pts=_cnt.tolist()
-                                    if _pts[0]!=_pts[-1]: _pts.append(_pts[0])
-                                    feats.append({"type":"Feature","geometry":{"type":"Polygon","coordinates":[_pts]},"properties":{"classification":{"name":_cls},"objectType":"annotation"}})
-                            _js.dump({"type":"FeatureCollection","features":feats}, open(qpath,"w",encoding="utf-8"))
-                            self.logger.info(f"Saved QuPath GeoJSON {len(feats)} features to {qpath}")
-                        except Exception as e:
-                            import traceback
-                            self.logger.warning(f"QuPath export failed: {e}\n{traceback.format_exc()}")
-                    else:
-                        try:
-                            qdir = __import__("os").path.join(__import__("os").path.dirname(__import__("os").path.dirname(output_path)) if "dat" in output_path else __import__("os").path.dirname(output_path), "qupath")
-                            # _qg expects dat_path and output_dir
-                            _qg(output_path, __import__("os").path.dirname(qdir), logger=self.logger)
-                        except Exception as e:
-                            import traceback
-                            self.logger.warning(f"QuPath export via exporter failed: {e}\n{traceback.format_exc()}")
             except Exception as e:
                 import traceback
-                self.logger.warning(f"highres viz failed: {e}\n{traceback.format_exc()}")
+                self.logger.warning(f"highres viz failed: {e}\\n{traceback.format_exc()}")
+        # QuPath GeoJSON export — single path via seg_core.core.exporter (qp_clean engine)
+        if save_qupath:
+            from seg_core.core.exporter import save_qupath_geojson_from_dat as _qg
+            try:
+                qdir = __import__("os").path.join(__import__("os").path.dirname(__import__("os").path.dirname(output_path)) if "dat" in output_path else __import__("os").path.dirname(output_path), "qupath")
+                _qg(output_path, __import__("os").path.dirname(qdir), logger=self.logger, fix_invalid=not qupath_no_clean, split_large=qupath_split, use_qpath_engine=not qupath_no_clean)
+            except Exception as e:
+                import traceback
+                self.logger.warning(f"QuPath export via exporter failed: {e}\\n{traceback.format_exc()}")
         return out
 
     def process_wsi_list(self, wsi_list, output_dir, mask_list=None,
-                         wsi_proc_mag=0.5, tile_shape=4096, ambiguous_size=64,
+                         wsi_proc_mag=0.5, tile_shape=4096, chunk_shape=6000, ambiguous_size=64,
                          flow_threshold=0.4, cellprob_threshold=0.0, min_size=15,
                          diameter=None, save_thumb=False, save_mask=False,
                          nr_post_proc_workers=0, logging_dir=None,
+                         patch_input_shape=512, patch_output_shape=512, cache_dir=None,
                          save_viz_highres=False, viz_highres_tile=2048, viz_highres_mpp=None, viz_highres_max_tiles=16,
-                         save_qupath=False):
+                         save_qupath=False, qupath_split=None, qupath_no_clean=False, use_cerberus_infer=False):
         os.makedirs(output_dir, exist_ok=True)
         os.makedirs(f"{output_dir}/dat", exist_ok=True)
         if save_thumb: os.makedirs(f"{output_dir}/thumb", exist_ok=True)
@@ -794,36 +914,16 @@ class CellposeWSI:
             out_path = f"{output_dir}/dat/{basename}.dat"
             if os.path.exists(out_path):
                 self.logger.info(f"Skip existing {basename}")
-                # qupath補画：已有dat但未导出geojson时补出
+                # QuPath backfill: export GeoJSON when dat exists but GeoJSON missing — single path via exporter
                 if save_qupath:
                     try:
                         qpath = os.path.join(output_dir, "qupath", f"{basename}.geojson")
-                        if not os.path.exists(qpath):
+                        # single-file default: any qupath/*.geojson counts as exported; exporter decides split
+                        has_qp = len(__import__("glob").glob(os.path.join(output_dir, "qupath", f"{basename}*.geojson"))) > 0
+                        if not has_qp:
                             self.logger.info(f"Backfill QuPath for {basename}")
-                            # reuse exporter or inline
-                            try:
-                                from seg_core.core.exporter import save_qupath_geojson_from_dat
-                                save_qupath_geojson_from_dat(out_path, output_dir, logger=self.logger)
-                            except Exception:
-                                # inline fallback
-                                import json, joblib, numpy as np
-                                info=joblib.load(out_path)
-                                proc_mpp=float(np.array(info["proc_resolution"]["resolution"]).flat[0]) if isinstance(info["proc_resolution"]["resolution"], (list, np.ndarray)) else float(info["proc_resolution"]["resolution"])
-                                base_mpp=float(np.array(info["base_resolution"]["resolution"]).flat[0]) if isinstance(info["base_resolution"]["resolution"], (list, np.ndarray)) else float(info["base_resolution"]["resolution"])
-                                scale=proc_mpp/base_mpp if base_mpp else 1.0
-                                os.makedirs(os.path.join(output_dir,"qupath"), exist_ok=True)
-                                feats=[]
-                                for _cls in ["Nuclei","Gland","Lumen"]:
-                                    _d=info.get(_cls, {}) or info.get(_cls.lower(),{})
-                                    for _uid,_inst in _d.items():
-                                        _cnt=np.array(_inst.get("contour",[]),dtype=float)
-                                        if _cnt.size==0 or _cnt.shape[0]<3: continue
-                                        if scale!=1.0: _cnt=_cnt*scale
-                                        _pts=_cnt.tolist()
-                                        if _pts[0]!=_pts[-1]: _pts.append(_pts[0])
-                                        feats.append({"type":"Feature","geometry":{"type":"Polygon","coordinates":[_pts]},"properties":{"classification":{"name":_cls},"objectType":"annotation"}})
-                                json.dump({"type":"FeatureCollection","features":feats}, open(qpath,"w",encoding="utf-8"))
-                                self.logger.info(f"Saved QuPath GeoJSON {len(feats)} to {qpath}")
+                            from seg_core.core.exporter import save_qupath_geojson_from_dat
+                            save_qupath_geojson_from_dat(out_path, output_dir, logger=self.logger, fix_invalid=not qupath_no_clean, split_large=qupath_split, use_qpath_engine=not qupath_no_clean)
                     except Exception as e:
                         import traceback
                         self.logger.warning(f"QuPath backfill failed {e}\\n{traceback.format_exc()}")
@@ -919,7 +1019,7 @@ class CellposeWSI:
                 cellprob_threshold=cellprob_threshold, min_size=min_size,
                 diameter=diameter, nr_post_proc_workers=nr_post_proc_workers,
                 save_viz_highres=save_viz_highres, viz_highres_tile=viz_highres_tile, viz_highres_mpp=viz_highres_mpp, viz_highres_max_tiles=viz_highres_max_tiles,
-                save_qupath=save_qupath
+                save_qupath=save_qupath, qupath_split=qupath_split, qupath_no_clean=qupath_no_clean, chunk_shape=chunk_shape, patch_input_shape=patch_input_shape, patch_output_shape=patch_output_shape, cache_dir=cache_dir, use_cerberus_infer=use_cerberus_infer
             )
 
 

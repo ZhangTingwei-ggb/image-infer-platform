@@ -1,4 +1,4 @@
-"""Cerberus 适配器 — 复用 seg_platform/models/cerberus 内的 InferManager，增加高分可视化"""
+"""Cerberus 适配器 — 复用 seg_platform/models/cerberus 内的 InferManager"""
 import os
 import sys
 import glob
@@ -55,11 +55,6 @@ class CerberusAdapter(BaseAdapter):
         cache_path = kwargs.get("cache_path", os.path.join(output_dir, "cache"))
         save_thumb = bool(kwargs.get("save_thumb", False))
         save_mask = bool(kwargs.get("save_mask", False))
-        # 高分可视化（cerberus 原生无此功能，平台新增）
-        save_viz_highres = bool(kwargs.get("save_viz_highres", False))
-        viz_highres_tile = int(kwargs.get("viz_highres_tile", 2048))
-        viz_highres_mpp = kwargs.get("viz_highres_mpp", None)
-        viz_highres_max_tiles = int(kwargs.get("viz_highres_max_tiles", 16))
 
         cache_path = f"{cache_path.rstrip('/')}/"
         os.makedirs(cache_path, exist_ok=True)
@@ -89,38 +84,12 @@ class CerberusAdapter(BaseAdapter):
         }
         self._infer.process_wsi_list(run_args)
 
-        # 后处：高分可视化（已有的 dat 补画，不重推理）
-        if save_viz_highres:
-            from seg_core.core.exporter import save_viz_highres_from_dat
-            # cerberus 的 logger 在 InferManager 内部，这里复用 print
-            for wsi_path, mask_path in zip(wsi_list, mask_list or [None]*len(wsi_list)):
-                basename = pathlib.Path(wsi_path).stem
-                dat_path = os.path.join(output_dir, "dat", f"{basename}.dat")
-                if not os.path.isfile(dat_path):
-                    # 兼容 cerberus 旧版可能直接以 stem 命名
-                    alt = glob.glob(os.path.join(output_dir, "dat", basename + ".*"))
-                    if alt:
-                        dat_path = alt[0]
-                    else:
-                        continue
-                # 若已存在 viz_highres 则跳过，避免重复生成
-                hr_root = os.path.join(output_dir, "viz_highres", basename)
-                if os.path.isdir(hr_root) and len(os.listdir(hr_root)) > 0:
-                    continue
-                try:
-                    save_viz_highres_from_dat(
-                        dat_path, wsi_path, output_dir,
-                        wsi_proc_mag=wsi_proc_mag,
-                        viz_highres_tile=viz_highres_tile,
-                        viz_highres_mpp=viz_highres_mpp,
-                        viz_highres_max_tiles=viz_highres_max_tiles,
-                        mask_path=mask_path,
-                    )
-                except Exception as e:
-                    print(f"[cerberus viz_highres] {basename} failed: {e}")
-        # QuPath GeoJSON
+        # QuPath GeoJSON — validated by QuPath engine, directly draggable
         if bool(kwargs.get("save_qupath", False)):
             from seg_core.core.exporter import save_qupath_geojson_from_dat
+            qupath_split = kwargs.get("qupath_split", None)
+            if qupath_split == 0: qupath_split = None
+            qupath_no_clean = bool(kwargs.get("qupath_no_clean", False))
             for wsi_path, mask_path in zip(wsi_list, mask_list or [None]*len(wsi_list)):
                 basename = pathlib.Path(wsi_path).stem
                 dat_path = os.path.join(output_dir, "dat", f"{basename}.dat")
@@ -130,11 +99,9 @@ class CerberusAdapter(BaseAdapter):
                         dat_path = alt[0]
                     else:
                         continue
-                qpath = os.path.join(output_dir, "qupath", f"{basename}.geojson")
-                if os.path.isfile(qpath):
-                    continue
+                # skip if exists (exporter handles overwrite/clean)
                 try:
-                    save_qupath_geojson_from_dat(dat_path, output_dir)
+                    save_qupath_geojson_from_dat(dat_path, output_dir, fix_invalid=not qupath_no_clean, split_large=qupath_split, use_qpath_engine=not qupath_no_clean)
                 except Exception as e:
                     print(f"[cerberus qupath] {basename} failed: {e}")
 

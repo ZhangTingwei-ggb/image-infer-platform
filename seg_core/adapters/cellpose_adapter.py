@@ -4,10 +4,9 @@ import torch
 from .base import BaseAdapter
 
 class CellposeAdapter(BaseAdapter):
-    def __init__(self, model_name="cpsam", gpu="0", use_bfloat16=False):
+    def __init__(self, model_name="cpsam", gpu="0"):
         self.model_name = model_name
         self.gpu = gpu
-        self.use_bfloat16 = use_bfloat16
         self._engine = None
         self._init_model()
 
@@ -21,7 +20,7 @@ class CellposeAdapter(BaseAdapter):
             return _orig(*a, **kw)
         torch.load = _patched
         from cellpose.models import CellposeModel
-        use_bf16 = bool(self.use_bfloat16)
+        use_bf16 = False
         if os.path.isdir(self.model_name) or os.path.isfile(self.model_name):
             self.model = CellposeModel(pretrained_model=self.model_name, gpu=torch.cuda.is_available(), use_bfloat16=use_bf16)
         else:
@@ -36,7 +35,7 @@ class CellposeAdapter(BaseAdapter):
         self._engine = CellposeWSI(self.model)
 
     def run(self, wsi_list, mask_list, output_dir, **kwargs):
-        # 透传所有 WSI 参数
+        # passthrough all WSI params including QuPath export
         self._engine.process_wsi_list(
             wsi_list=wsi_list, output_dir=output_dir, mask_list=mask_list,
             wsi_proc_mag=kwargs.get("wsi_proc_mag", 0.5),
@@ -49,11 +48,14 @@ class CellposeAdapter(BaseAdapter):
             save_thumb=kwargs.get("save_thumb", False),
             save_mask=kwargs.get("save_mask", False),
             nr_post_proc_workers=kwargs.get("nr_post_proc_workers", 0),
-            save_viz_highres=kwargs.get("save_viz_highres", False),
-            viz_highres_tile=kwargs.get("viz_highres_tile", 2048),
-            viz_highres_mpp=kwargs.get("viz_highres_mpp"),
-            viz_highres_max_tiles=kwargs.get("viz_highres_max_tiles", 16),
             save_qupath=kwargs.get("save_qupath", False),
+            qupath_split=kwargs.get("qupath_split", None),
+            qupath_no_clean=kwargs.get("qupath_no_clean", False),
+            chunk_shape=kwargs.get("chunk_shape", 6000),
+            patch_input_shape=kwargs.get("patch_input_shape", 512),
+            patch_output_shape=kwargs.get("patch_output_shape", 512),
+            cache_dir=kwargs.get("cache_path", kwargs.get("cache_dir", None)),
+            use_cerberus_infer=kwargs.get("use_cerberus_infer", False),
         )
 
     def get_info(self):

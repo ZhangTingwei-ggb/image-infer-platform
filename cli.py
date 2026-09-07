@@ -1,11 +1,8 @@
 #!/usr/bin/env python
 """
 seg_platform 统一入口 — 不同命令调用不同模型
-  python cli.py --model cerberus --input_dir ... --output_dir ... [cerberus 参数] [--save_viz_highres ...]
-  python cli.py --model cellpose --input_dir ... --output_dir ... [cellpose 参数] [--save_viz_highres ...]
-
-可视化参数（两模型通用，适配后处）：
-  --save_viz_highres --viz_highres_tile 2048 --viz_highres_mpp None --viz_highres_max_tiles 16
+  python cli.py --model cerberus --input_dir ... --output_dir ... [cerberus 参数]
+  python cli.py --model cellpose --input_dir ... --output_dir ... [cellpose 参数]
 """
 import os
 import sys
@@ -21,7 +18,7 @@ def build_parser():
     p.add_argument("--output_dir", required=True, help="输出目录")
     p.add_argument("--msk_dir", default=None, help="组织掩膜目录（同名 png，可选）")
     p.add_argument("--wsi_file_ext", default=".svs", help="WSI extension, comma-separated for multiple e.g. .svs,.tiff or * for all [default: .svs]")
-    p.add_argument("--gpu", default="0", help="GPU id，如 0 或 0,1，空字符串用 CPU")
+    p.add_argument("--gpu", default="0", help="GPU id(s) for CUDA_VISIBLE_DEVICES, e.g. \"0\" or \"0,1\"; empty string = CPU")
     # 通用 WSI / 后处理（两模型对齐）
     p.add_argument("--wsi_proc_mag", type=float, default=0.5, help="处理 mpp [default: 0.5]")
     p.add_argument("--tile_shape", type=int, default=4096, help="核后处理 tile [default: 4096]")
@@ -34,19 +31,16 @@ def build_parser():
     p.add_argument("--nr_post_proc_workers", type=int, default=0, help="后处理并行")
     p.add_argument("--save_thumb", action="store_true", help="保存缩略图")
     p.add_argument("--save_mask", action="store_true", help="保存掩膜")
-    # 高分可视化（两模型通用，已适配 cerberus）
-    p.add_argument("--save_viz_highres", action="store_true", help="生成高分分块 viz_highres/<basename>/xxx.png")
-    p.add_argument("--viz_highres_tile", type=int, default=2048, help="高分 tile 边长 [default: 2048]")
-    p.add_argument("--viz_highres_mpp", type=float, default=None, help="高分 mpp，默认 base mpp")
-    p.add_argument("--viz_highres_max_tiles", type=int, default=16, help="最多生成多少张，-1 不限 [default: 16]")
-    p.add_argument("--save_qupath", action="store_true", help="export QuPath-readable GeoJSON (qupath/<basename>.geojson) alongside dat")
+    p.add_argument("--use_cerberus_infer", action="store_true", help="cellpose use Cerberus-style chunk+flow memmap inference (chunk/patch batching, logs Inference/PostProc Time) instead of direct per-4096")
+    p.add_argument("--save_qupath", action="store_true", help="export QuPath-readable GeoJSON (qupath/<basename>.geojson) alongside dat — validated by QuPath engine (GsonTools), directly draggable in QuPath 0.7 (zero Reduction failed, single file by default)")
+    p.add_argument("--qupath_split", type=int, default=0, help="QuPath split N (default 0 = single file, 30000 = ~15M/part) [only with --save_qupath]")
+    p.add_argument("--qupath_no_clean", action="store_true", help="disable QuPath engine cleaning (raw export, not draggable)")
     # Cellpose 专属
     p.add_argument("--cellpose_model", default="cpsam", help="cellpose 模型名或路径 [default: cpsam]")
     p.add_argument("--diameter", type=float, default=None, help="cellpose diameter，None 自动")
     p.add_argument("--flow_threshold", type=float, default=0.4)
     p.add_argument("--cellprob_threshold", type=float, default=0.0)
     p.add_argument("--min_size", type=int, default=15)
-    p.add_argument("--use_bfloat16", action="store_true", help="cellpose 强制 bfloat16（4090 慎用）")
     # Cerberus 专属
     p.add_argument("--cerberus_model", default=None, help="cerberus 权重目录，默认 models/cerberus/pretrained_weights/resnet34_cerberus")
     p.add_argument("--cache_path", default=None, help="cerberus cache 路径，默认 output_dir/cache")
@@ -120,11 +114,9 @@ def main():
         nr_post_proc_workers=args.nr_post_proc_workers,
         save_thumb=args.save_thumb,
         save_mask=args.save_mask,
-        save_viz_highres=args.save_viz_highres,
-        viz_highres_tile=args.viz_highres_tile,
-        viz_highres_mpp=args.viz_highres_mpp,
-        viz_highres_max_tiles=args.viz_highres_max_tiles,
         save_qupath=args.save_qupath,
+        qupath_split=(None if args.qupath_split==0 else args.qupath_split),
+        qupath_no_clean=args.qupath_no_clean,
         msk_dir=args.msk_dir,
     )
 
@@ -140,7 +132,7 @@ def main():
         )
     else:
         from seg_core.adapters.cellpose_adapter import CellposeAdapter
-        adapter = CellposeAdapter(model_name=args.cellpose_model, gpu=args.gpu, use_bfloat16=args.use_bfloat16)
+        adapter = CellposeAdapter(model_name=args.cellpose_model, gpu=args.gpu)
         adapter.run(
             wsi_list, mask_list, args.output_dir,
             diameter=args.diameter,

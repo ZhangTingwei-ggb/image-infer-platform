@@ -19,9 +19,53 @@ BORDER = "#E2E8F0"
 ACCENT = "#2563EB"
 ACCENT_H = "#1D4ED8"
 INK = "#0F172A"
+FG = INK
 MUTED = "#64748B"
 CODE_BG = "#0F172A"
 CODE_FG = "#E2E8F0"
+
+# --- Font: use real vector fonts available on Linux, avoid bitmap fallback ---
+# Inter / JetBrains Mono are not installed on this OS -> Tk falls back to "fixed" bitmap = pixelated
+# Pick first available from fc-list so rendering goes through Xft (antialiased)
+def _pick_font(candidates):
+    try:
+        import tkinter.font as tkfont
+        avail = set(f.lower() for f in tkfont.families())
+        # tkfont.families() can be incomplete in headless Xvfb; also check fontconfig
+        # so we probe Tk creation too
+        for name in candidates:
+            if name.lower() in avail:
+                return name
+            # try creating the font - if Tk can resolve it without falling back to "fixed"
+            try:
+                f = tkfont.Font(family=name, size=10)
+                actual = f.actual("family").lower()
+                if actual == name.lower() or actual not in ("fixed", "clean", "nil"):
+                    return name
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return candidates[-1]
+
+# resolved once Tk root exists; defaults set here and re-resolved in App.__init__
+# seg_platform GUI uses smooth humanist sans - Ubuntu is the most fluent installed (round, open curves)
+FONT_UI = "Ubuntu"
+FONT_MONO = "Ubuntu Mono"
+
+def _resolve_fonts(root=None):
+    global FONT_UI, FONT_MONO
+    # priority: Ubuntu most fluent -> DejaVu -> Liberation (all vector + CJK friendly, Xft antialiased)
+    ui_candidates = ["Ubuntu", "DejaVu Sans", "Liberation Sans", "Noto Sans", "Arial", "Helvetica"]
+    mono_candidates = ["Ubuntu Mono", "DejaVu Sans Mono", "Liberation Mono", "Noto Sans Mono", "Courier New", "Courier"]
+    FONT_UI = _pick_font(ui_candidates) if root is None else _pick_font(ui_candidates)
+    FONT_MONO = _pick_font(mono_candidates) if root is None else _pick_font(mono_candidates)
+    # If Tk still only knows bitmap fonts (headless), force Ubuntu anyway - real desktop will render correctly
+    if FONT_UI.lower() in ("fixed", "clean", "nil"):
+        FONT_UI = "Ubuntu"
+    if FONT_MONO.lower() in ("fixed", "clean", "nil"):
+        FONT_MONO = "Ubuntu Mono"
+    return FONT_UI, FONT_MONO
 
 def _style():
     s = ttk.Style()
@@ -29,19 +73,19 @@ def _style():
     except: pass
     s.configure("TFrame", background=BG)
     s.configure("Card.TFrame", background=CARD)
-    s.configure("TLabel", background=BG, foreground=INK, font=("Inter", 10))
-    s.configure("Card.TLabel", background=CARD, foreground=INK, font=("Inter", 10))
-    s.configure("Muted.TLabel", background=CARD, foreground=MUTED, font=("Inter", 9))
-    s.configure("Title.TLabel", background=CARD, foreground=INK, font=("Inter", 16, "bold"))
-    s.configure("Sub.TLabel", background=CARD, foreground=MUTED, font=("Inter", 9))
-    s.configure("Section.TLabel", background=CARD, foreground=INK, font=("Inter", 11, "bold"))
-    s.configure("TButton", font=("Inter", 10), padding=(10, 6))
-    s.configure("Accent.TButton", background=ACCENT, foreground="white", font=("Inter", 10, "bold"))
+    s.configure("TLabel", background=BG, foreground=INK, font=(FONT_UI, 10))
+    s.configure("Card.TLabel", background=CARD, foreground=INK, font=(FONT_UI, 10))
+    s.configure("Muted.TLabel", background=CARD, foreground=MUTED, font=(FONT_UI, 9))
+    s.configure("Title.TLabel", background=CARD, foreground=INK, font=(FONT_UI, 16, "bold"))
+    s.configure("Sub.TLabel", background=CARD, foreground=MUTED, font=(FONT_UI, 9))
+    s.configure("Section.TLabel", background=CARD, foreground=INK, font=(FONT_UI, 11, "bold"))
+    s.configure("TButton", font=(FONT_UI, 10), padding=(10, 6))
+    s.configure("Accent.TButton", background=ACCENT, foreground="white", font=(FONT_UI, 10, "bold"))
     s.map("Accent.TButton", background=[("active", ACCENT_H), ("disabled", "#93C5FD")])
     s.configure("Ghost.TButton", background=CARD, foreground=INK)
     s.configure("TEntry", padding=6)
-    s.configure("TCheckbutton", background=CARD, font=("Inter", 10))
-    s.configure("TRadiobutton", background=CARD, font=("Inter", 10))
+    s.configure("TCheckbutton", background=CARD, font=(FONT_UI, 10))
+    s.configure("TRadiobutton", background=CARD, font=(FONT_UI, 10))
     s.configure("Horizontal.TProgressbar", troughcolor=BORDER, background=ACCENT)
 
 class ScrollFrame(ttk.Frame):
@@ -49,33 +93,64 @@ class ScrollFrame(ttk.Frame):
         super().__init__(parent)
         cv = tk.Canvas(self, bg=CARD, highlightthickness=0)
         vs = ttk.Scrollbar(self, orient="vertical", command=cv.yview)
+        hs = ttk.Scrollbar(self, orient="horizontal", command=cv.xview)
         self.inner = ttk.Frame(cv, style="Card.TFrame")
         self.inner.bind("<Configure>", lambda e: cv.configure(scrollregion=cv.bbox("all")))
         win = cv.create_window((0,0), window=self.inner, anchor="nw")
-        cv.bind("<Configure>", lambda e: cv.itemconfig(win, width=e.width))
-        cv.configure(yscrollcommand=vs.set)
-        cv.pack(side="left", fill="both", expand=True)
+        # sync width only if inner narrower than canvas; allow wider content to scroll horizontally
+        def _on_cv_config(e):
+            cw = e.width
+            iw = self.inner.winfo_reqwidth()
+            cv.itemconfig(win, width=max(cw, iw) if iw > cw else cw)
+        cv.bind("<Configure>", _on_cv_config)
+        cv.configure(yscrollcommand=vs.set, xscrollcommand=hs.set)
         vs.pack(side="right", fill="y")
-        # proper mouse wheel: support Linux Button-4/5 and Windows MouseWheel, only when hovered
+        hs.pack(side="bottom", fill="x")
+        cv.pack(side="left", fill="both", expand=True)
+        # vertical scroll; Shift+wheel = horizontal scroll
         def _on_wheel(e):
+            # Shift held -> horizontal
+            if getattr(e, "state", 0) & 0x1:  # Shift mask
+                if getattr(e, "num", None) == 4:
+                    cv.xview_scroll(-3, "units")
+                elif getattr(e, "num", None) == 5:
+                    cv.xview_scroll(3, "units")
+                else:
+                    cv.xview_scroll(int(-1*(e.delta/120)), "units")
+                return
             if getattr(e, "num", None) == 4:
                 cv.yview_scroll(-3, "units")
             elif getattr(e, "num", None) == 5:
                 cv.yview_scroll(3, "units")
             else:
                 cv.yview_scroll(int(-1*(e.delta/120)), "units")
+        def _on_shift_wheel(e):
+            # explicit Shift+MouseWheel binding
+            if getattr(e, "num", None) == 4:
+                cv.xview_scroll(-3, "units")
+            elif getattr(e, "num", None) == 5:
+                cv.xview_scroll(3, "units")
+            else:
+                cv.xview_scroll(int(-1*(e.delta/120)), "units")
         def _bind(e=None):
             cv.bind_all("<MouseWheel>", _on_wheel)
             cv.bind_all("<Button-4>", _on_wheel)
             cv.bind_all("<Button-5>", _on_wheel)
+            cv.bind_all("<Shift-MouseWheel>", _on_shift_wheel)
+            cv.bind_all("<Shift-Button-4>", _on_shift_wheel)
+            cv.bind_all("<Shift-Button-5>", _on_shift_wheel)
         def _unbind(e=None):
             cv.unbind_all("<MouseWheel>")
             cv.unbind_all("<Button-4>")
             cv.unbind_all("<Button-5>")
+            cv.unbind_all("<Shift-MouseWheel>")
+            cv.unbind_all("<Shift-Button-4>")
+            cv.unbind_all("<Shift-Button-5>")
         for w in (cv, self.inner):
             w.bind("<Enter>", _bind)
             w.bind("<Leave>", _unbind)
         self.canvas = cv
+        self.hs = hs
         self._on_wheel = _on_wheel
 
 # ---------- Custom English directory picker (avoids OS language) ----------
@@ -103,7 +178,7 @@ class EnglishDirDialog(tk.Toplevel):
         # list
         mid = ttk.Frame(self, padding=(10,0,10,0))
         mid.pack(fill="both", expand=True)
-        self.listbox = tk.Listbox(mid, selectmode="single", font=("Inter", 10), activestyle="dotbox")
+        self.listbox = tk.Listbox(mid, selectmode="single", font=(FONT_UI, 10), activestyle="dotbox")
         vs = ttk.Scrollbar(mid, orient="vertical", command=self.listbox.yview)
         self.listbox.configure(yscrollcommand=vs.set)
         self.listbox.pack(side="left", fill="both", expand=True)
@@ -168,6 +243,7 @@ def ask_directory_english(parent, title="Select Directory", initialdir=""):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
+        _resolve_fonts(self)
         self.title("seg_platform — Unified WSI Segmentation")
         self.geometry("1240x780")
         self.minsize(1120, 680)
@@ -187,7 +263,6 @@ class App(tk.Tk):
         left = ttk.Frame(top, style="Card.TFrame", padding=(16, 12))
         left.grid(row=0, column=0, sticky="w")
         ttk.Label(left, text="seg_platform", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(left, text="Cerberus + Cellpose  ·  Copy, don't modify sources  ·  High-res viz for both models", style="Sub.TLabel").pack(anchor="w", pady=(2,0))
         right = ttk.Frame(top, style="Card.TFrame", padding=(0, 12))
         right.grid(row=0, column=1, sticky="e", padx=12)
         ttk.Button(right, text="Docs", style="Ghost.TButton", command=self._open_readme).pack(side="right", padx=4)
@@ -219,7 +294,7 @@ class App(tk.Tk):
         box.grid(row=1, column=0, sticky="nsew")
         box.rowconfigure(0, weight=1); box.columnconfigure(0, weight=1)
         self.log_text = tk.Text(box, bg=CODE_BG, fg=CODE_FG, insertbackground="white",
-                                font=("JetBrains Mono", 9), wrap="word", bd=0, padx=10, pady=10,
+                                font=(FONT_MONO, 9), wrap="word", bd=0, padx=10, pady=10,
                                 selectbackground="#334155", selectforeground="white",
                                 inactiveselectbackground="#334155", exportselection=True,
                                 undo=True)
@@ -247,13 +322,13 @@ class App(tk.Tk):
         self.run_btn.pack(side="left")
         ttk.Button(bar, text="■  Stop", command=self._stop).pack(side="left", padx=6)
         ttk.Button(bar, text="Open Output", command=self._open_output).pack(side="left", padx=6)
-        ttk.Button(bar, text="Preview Viz", command=self._preview).pack(side="left", padx=6)
+        ttk.Button(bar, text="Open QuPath", command=self._preview).pack(side="left", padx=6)
         ttk.Button(bar, text="Clear", command=self._clear).pack(side="right")
 
         self._add_model()
         self._add_io()
         self._add_common()
-        self._add_viz()
+        self._add_qupath()
         self._add_cellpose()
         self._add_cerberus()
 
@@ -273,7 +348,7 @@ class App(tk.Tk):
     def _field(self, parent, label, var, browse=False, browse_title="Select Directory"):
         row = ttk.Frame(parent, style="Card.TFrame")
         row.pack(fill="x", pady=4)
-        ttk.Label(row, text=label, style="Card.TLabel", width=28).pack(side="left")
+        ttk.Label(row, text=label, style="Card.TLabel", width=22).pack(side="left")
         e = ttk.Entry(row, textvariable=var)
         e.pack(side="left", fill="x", expand=True, padx=(6,6))
         if browse:
@@ -283,33 +358,35 @@ class App(tk.Tk):
         row = ttk.Frame(parent, style="Card.TFrame")
         row.pack(fill="x", pady=3)
         ttk.Label(row, text=label, style="Card.TLabel", width=22).pack(side="left")
-        ttk.Entry(row, textvariable=var, width=14).pack(side="left", padx=6)
+        ttk.Entry(row, textvariable=var, width=18).pack(side="left", padx=6)
         if hint:
             ttk.Label(row, text=hint, style="Card.TLabel", foreground=MUTED).pack(side="left")
         return row
 
     def _add_model(self):
-        sec = self._section("Model", "Different commands for different models · parameters are explicit")
+        sec = self._section("Model")
         self.model_var = tk.StringVar(value="cellpose")
         row = ttk.Frame(sec, style="Card.TFrame"); row.pack(fill="x", pady=2)
         ttk.Radiobutton(row, text="Cellpose (cpsam / cyto) — Fast · Low VRAM", variable=self.model_var, value="cellpose", command=self._switch_model).pack(side="left", padx=6)
         ttk.Radiobutton(row, text="Cerberus (Gland / Lumen / Nuclei) — 4 tasks", variable=self.model_var, value="cerberus", command=self._switch_model).pack(side="left", padx=18)
 
     def _add_io(self):
-        sec = self._section("Input / Output", "Non-recursive WSI folder; mask optional, same stem .png")
+        sec = self._section("Input / Output")
         self._field(sec, "Input Directory *", self._var("input_dir"), browse=True, browse_title="Select Input Directory")
         self._field(sec, "Output Directory *", self._var("output_dir"), browse=True, browse_title="Select Output Directory")
         self._field(sec, "Mask Directory", self._var("msk_dir"), browse=True, browse_title="Select Mask Directory")
         r = ttk.Frame(sec, style="Card.TFrame"); r.pack(fill="x", pady=4)
         ttk.Label(r, text="WSI Extension", style="Card.TLabel", width=22).pack(side="left")
-        ttk.Entry(r, textvariable=self._var("wsi_file_ext",".svs,.tiff"), width=14).pack(side="left", padx=6)
+        ttk.Entry(r, textvariable=self._var("wsi_file_ext",".svs,.tiff"), width=18).pack(side="left", padx=6)
         ttk.Label(r, text="comma-separated, * for all", style="Card.TLabel", foreground=MUTED).pack(side="left", padx=6)
-        ttk.Label(r, text="GPU", style="Card.TLabel").pack(side="left", padx=(14,4))
-        ttk.Entry(r, textvariable=self._var("gpu","0"), width=12).pack(side="left", padx=6)
-        ttk.Label(r, text='e.g. 0 / 0,1 / ""=CPU', style="Card.TLabel", foreground=MUTED).pack(side="left", padx=6)
+        # GPU — dedicated row with wider input
+        gr = ttk.Frame(sec, style="Card.TFrame"); gr.pack(fill="x", pady=4)
+        ttk.Label(gr, text="GPU", style="Card.TLabel", width=22).pack(side="left")
+        ttk.Entry(gr, textvariable=self._var("gpu","0"), width=28).pack(side="left", padx=6)
+        ttk.Label(gr, text="CUDA_VISIBLE_DEVICES  ·  e.g. 0  /  0,1  /  empty = CPU", style="Card.TLabel", foreground=MUTED).pack(side="left", padx=6)
 
     def _add_common(self):
-        sec = self._section("WSI / Post-processing", "Aligned for both models")
+        sec = self._section("WSI / Post-processing")
         g = ttk.Frame(sec, style="Card.TFrame"); g.pack(fill="x")
         L = ttk.Frame(g, style="Card.TFrame"); L.pack(side="left", fill="x", expand=True, padx=(0,8))
         R = ttk.Frame(g, style="Card.TFrame"); R.pack(side="left", fill="x", expand=True)
@@ -317,43 +394,35 @@ class App(tk.Tk):
         self._num(L, "tile_shape (px)", self._var("tile_shape","4096"), "2048 if OOM")
         self._num(L, "ambiguous_size (px)", self._var("ambiguous_size","64"), "")
         self._num(L, "batch_size", self._var("batch_size","30"), "")
-        self._num(R, "chunk_shape (px)", self._var("chunk_shape","15000"), "Cerberus")
+        self._num(R, "chunk_shape (px)", self._var("chunk_shape","15000"))
         self._num(R, "patch_input (px)", self._var("patch_input_shape","448"), "")
         self._num(R, "patch_output (px)", self._var("patch_output_shape","144"), "")
-        self._num(R, "nr_post_proc_workers", self._var("nr_post_proc_workers","0"), "0 = serial")
+        self._num(R, "nr_post_proc_workers", self._var("nr_post_proc_workers","0"))
         row = ttk.Frame(sec, style="Card.TFrame"); row.pack(fill="x", pady=(8,2))
         self._bool("save_thumb", False); self._bool("save_mask", False)
-        tk.Checkbutton(row, text="save_thumb  →  thumb/", variable=self.vars["save_thumb"], bg=CARD, activebackground=CARD, selectcolor="white", fg=FG, activeforeground=FG, font=("Inter", 10), highlightthickness=0, bd=0, anchor="w").pack(side="left", padx=4)
-        tk.Checkbutton(row, text="save_mask  →  mask/", variable=self.vars["save_mask"], bg=CARD, activebackground=CARD, selectcolor="white", fg=FG, activeforeground=FG, font=("Inter", 10), highlightthickness=0, bd=0, anchor="w").pack(side="left", padx=12)
+        tk.Checkbutton(row, text="save_thumb  →  thumb/", variable=self.vars["save_thumb"], bg=CARD, activebackground=CARD, selectcolor="white", fg=FG, activeforeground=FG, font=(FONT_UI, 10), highlightthickness=0, bd=0, anchor="w").pack(side="left", padx=4)
+        tk.Checkbutton(row, text="save_mask  →  mask/", variable=self.vars["save_mask"], bg=CARD, activebackground=CARD, selectcolor="white", fg=FG, activeforeground=FG, font=(FONT_UI, 10), highlightthickness=0, bd=0, anchor="w").pack(side="left", padx=12)
 
-    def _add_viz(self):
-        sec = self._section("High-res Tiled Visualization", "Native-resolution tiles for zoomed boundary inspection; off by default")
+    def _add_qupath(self):
+        sec = self._section("QuPath Export")
         row = ttk.Frame(sec, style="Card.TFrame"); row.pack(fill="x")
-        self._bool("save_viz_highres", False)
-        tk.Checkbutton(row, text="Enable  →  viz_highres/<basename>/  ✓", variable=self.vars["save_viz_highres"], bg=CARD, activebackground=CARD, selectcolor="white", fg=FG, activeforeground=FG, font=("Inter", 10), highlightthickness=0, bd=0, anchor="w").pack(side="left")
-        g = ttk.Frame(sec, style="Card.TFrame"); g.pack(fill="x", pady=6)
-        self._num(g, "viz_tile (px)", self._var("viz_highres_tile","2048"), "")
-        self._num(g, "viz_mpp (mpp)", self._var("viz_highres_mpp",""), "empty = base mpp (~0.261)")
-        self._num(g, "max_tiles", self._var("viz_highres_max_tiles","16"), "-1 = all")
-        row2 = ttk.Frame(sec, style="Card.TFrame"); row2.pack(fill="x", pady=(8,2))
         self._bool("save_qupath", False)
-        tk.Checkbutton(row2, text="Export QuPath GeoJSON  →  qupath/<basename>.geojson  ✓", variable=self.vars["save_qupath"], bg=CARD, activebackground=CARD, selectcolor="white", fg=FG, activeforeground=FG, font=("Inter", 10), highlightthickness=0, bd=0, anchor="w").pack(side="left")
-        ttk.Label(sec, text="QuPath: open original SVS in QuPath, then drag & drop the .geojson to overlay. No re-inference needed if dat exists.", style="Muted.TLabel", wraplength=540, justify="left").pack(anchor="w", pady=(6,0))
+        tk.Checkbutton(row, text="Export QuPath GeoJSON  →  qupath/<basename>.geojson", variable=self.vars["save_qupath"], bg=CARD, activebackground=CARD, selectcolor="white", fg=FG, activeforeground=FG, font=(FONT_UI, 10, "bold"), highlightthickness=0, bd=0, anchor="w").pack(side="left")
 
     def _add_cellpose(self):
         self.cellpose_frame = self._section("Cellpose Parameters", "cpsam / cyto / cyto2 / cyto3 or local path")
         self._field(self.cellpose_frame, "model", self._var("cellpose_model","cpsam"))
         self._num(self.cellpose_frame, "diameter", self._var("diameter",""), "None = auto, 15–20 for 0.5 mpp H&E")
         g = ttk.Frame(self.cellpose_frame, style="Card.TFrame"); g.pack(fill="x")
-        self._num(g, "flow_threshold", self._var("flow_threshold","0.4"), "")
-        self._num(g, "cellprob_threshold", self._var("cellprob_threshold","0.0"), "")
-        self._num(g, "min_size", self._var("min_size","15"), "")
+        self._num(g, "flow_threshold", self._var("flow_threshold","0.4"), "0.4 default; ↑ stricter (fewer merges)")
+        self._num(g, "cellprob_threshold", self._var("cellprob_threshold","0.0"), "0.0 default; ↑ fewer cells (higher confidence)")
+        self._num(g, "min_size", self._var("min_size","15"), "drop smaller masks")
         row = ttk.Frame(self.cellpose_frame, style="Card.TFrame"); row.pack(fill="x", pady=4)
-        self._bool("use_bfloat16", False)
-        tk.Checkbutton(row, text="use_bfloat16  (4090 may crash: upsample BFloat16)", variable=self.vars["use_bfloat16"], bg=CARD, activebackground=CARD, selectcolor="white", fg=FG, activeforeground=FG, font=("Inter", 10), highlightthickness=0, bd=0, anchor="w").pack(side="left")
+        self._bool("use_cerberus_infer", False)
+        tk.Checkbutton(row, text="use_cerberus_infer  (chunk + flow memmap)", variable=self.vars["use_cerberus_infer"], bg=CARD, activebackground=CARD, selectcolor="white", fg=FG, activeforeground=FG, font=(FONT_UI, 10), highlightthickness=0, bd=0, anchor="w").pack(side="left", padx=4)
 
     def _add_cerberus(self):
-        self.cerberus_frame = self._section("Cerberus Parameters", "Gland / Lumen / Nuclei / Patch-Class")
+        self.cerberus_frame = self._section("Cerberus Parameters")
         self._field(self.cerberus_frame, "Weights dir", self._var("cerberus_model", str(ROOT/"models/cerberus/pretrained_weights/resnet34_cerberus")), browse=True, browse_title="Select Cerberus Weights Directory")
         self._field(self.cerberus_frame, "Cache path (SSD 100GB+)", self._var("cache_path",""), browse=True, browse_title="Select Cache Directory")
         self._field(self.cerberus_frame, "Logging dir", self._var("logging_dir",""), browse=True, browse_title="Select Logging Directory")
@@ -390,11 +459,28 @@ class App(tk.Tk):
         p = ROOT / "README.md"
         if p.exists(): self._open_folder(str(p))
     def _preview(self):
+        # Directly launch QuPath; if output/qupath exists also open its folder
+        qbin = "/home/linjiatai/QuPath/QuPath/bin/QuPath"
         out = self.vars["output_dir"].get().strip()
-        if not out or not os.path.isdir(out):
-            messagebox.showwarning("Tip", "Output directory not found"); return
-        vh = os.path.join(out, "viz_highres")
-        self._open_folder(vh if os.path.isdir(vh) and os.listdir(vh) else out)
+        # if output/qupath exists, open folder first
+        if out and os.path.isdir(out):
+            qp = os.path.join(out, "qupath")
+            if os.path.isdir(qp) and os.listdir(qp):
+                self._open_folder(qp)
+        # launch QuPath app directly
+        try:
+            if os.path.isfile(qbin) and os.access(qbin, os.X_OK):
+                subprocess.Popen([qbin], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+                self.status_var.set("QuPath launched")
+                return
+            # fallback: open bin folder
+            qbin_dir = os.path.dirname(qbin)
+            if os.path.isdir(qbin_dir):
+                self._open_folder(qbin_dir); return
+        except Exception as e:
+            messagebox.showerror("QuPath", f"Failed to launch QuPath\n{qbin}\n{e}")
+            return
+        messagebox.showwarning("Tip", f"QuPath not found at {qbin}")
     def _clear(self): self.log_text.delete("1.0", tk.END)
     def _select_all_log(self):
         self.log_text.tag_add("sel", "1.0", "end-1c")
@@ -446,18 +532,18 @@ class App(tk.Tk):
         if g("msk_dir"): args += ["--msk_dir", g("msk_dir")]
         if self.vars["save_thumb"].get(): args.append("--save_thumb")
         if self.vars["save_mask"].get(): args.append("--save_mask")
-        if self.vars["save_viz_highres"].get():
-            args.append("--save_viz_highres")
-            args += ["--viz_highres_tile", g("viz_highres_tile","2048")]
-            if g("viz_highres_mpp"): args += ["--viz_highres_mpp", g("viz_highres_mpp")]
-            args += ["--viz_highres_max_tiles", g("viz_highres_max_tiles","16")]
         if self.vars["save_qupath"].get():
             args.append("--save_qupath")
+        # cellpose cerberus-style
+        try:
+            if self.vars["use_cerberus_infer"].get():
+                args.append("--use_cerberus_infer")
+        except Exception:
+            pass
         if m == "cellpose":
             args += ["--cellpose_model", g("cellpose_model","cpsam")]
             if g("diameter"): args += ["--diameter", g("diameter")]
             args += ["--flow_threshold", g("flow_threshold","0.4"), "--cellprob_threshold", g("cellprob_threshold","0.0"), "--min_size", g("min_size","15")]
-            if self.vars["use_bfloat16"].get(): args.append("--use_bfloat16")
         else:
             if g("cerberus_model"): args += ["--cerberus_model", g("cerberus_model")]
             if g("cache_path"): args += ["--cache_path", g("cache_path")]
